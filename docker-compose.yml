@@ -1,0 +1,138 @@
+version: "3.9"
+
+services:
+  # ============ Infrastructure ============
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-axeworks}
+      POSTGRES_USER: ${POSTGRES_USER:-axeworks}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-axeworks_dev_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./shared_infra/data_foundation/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-axeworks}"]
+      interval: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:6333/healthz || exit 1"]
+      interval: 5s
+      retries: 5
+
+  # ============ Shared Infrastructure ============
+  policy-engine:
+    build:
+      context: .
+      dockerfile: shared_infra/policy_engine/Dockerfile
+    ports:
+      - "${POLICY_ENGINE_PORT:-8003}:8003"
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  poqat-monitor:
+    build:
+      context: .
+      dockerfile: shared_infra/poqat_monitor/Dockerfile
+    ports:
+      - "${POQAT_PORT:-8004}:8004"
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  data-foundation:
+    build:
+      context: .
+      dockerfile: shared_infra/data_foundation/Dockerfile
+    ports:
+      - "${DATA_FOUNDATION_PORT:-8005}:8005"
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ============ Core Engines ============
+  axengine:
+    build:
+      context: .
+      dockerfile: axengine/Dockerfile
+    ports:
+      - "${AXENGINE_PORT:-8001}:8001"
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      policy-engine:
+        condition: service_started
+      data-foundation:
+        condition: service_started
+
+  axe-poe:
+    build:
+      context: .
+      dockerfile: axe_poe/Dockerfile
+    ports:
+      - "${AXE_POE_PORT:-8002}:8002"
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      policy-engine:
+        condition: service_started
+      data-foundation:
+        condition: service_started
+
+  # ============ Frontend ============
+  operator-cockpit:
+    build:
+      context: ./operator_cockpit
+      dockerfile: Dockerfile
+    ports:
+      - "${COCKPIT_PORT:-3000}:3000"
+    env_file: .env
+    depends_on:
+      - axengine
+      - axe-poe
+      - policy-engine
+      - poqat-monitor
+
+volumes:
+  pg_data:
+  redis_data:
+  qdrant_data:
